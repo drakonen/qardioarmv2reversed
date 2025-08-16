@@ -15,8 +15,8 @@ BP_FEATURE_CHAR_UUID = "00002a49-0000-1000-8000-00805f9b34fb"  # Blood Pressure 
 ACTIVATION_DATA = bytes.fromhex('f101')  # Data to activate measurement
 
 # Retry configuration
-MAX_DISCOVERY_RETRIES = 3
-MAX_CONNECTION_RETRIES = 3
+MAX_DISCOVERY_RETRIES = 10
+MAX_CONNECTION_RETRIES = 10
 RETRY_DELAY = 1  # seconds
 
 def parse_blood_pressure_measurement(data):
@@ -142,7 +142,7 @@ async def connect_to_device(device):
     for attempt in range(1, MAX_CONNECTION_RETRIES + 1):
         try:
             logger.info(f"Attempting to connect to {device.address} (attempt {attempt}/{MAX_CONNECTION_RETRIES})...")
-            client = BleakClient(device.address)
+            client = BleakClient(device)
             
             await client.connect()
             logger.info(f"Connected to {DEVICE_NAME}!")
