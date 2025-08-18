@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import json
+import os
+from datetime import datetime
 from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
 
@@ -21,6 +24,35 @@ RETRY_DELAY = 1  # seconds
 
 # Event to signal that a successful measurement has been received
 measurement_event = None  # type: asyncio.Event | None
+
+# File to store all measurements as an array of JSON objects
+MEASUREMENTS_FILE = os.path.join(os.path.dirname(__file__), "measurements.json")
+
+def append_measurement_to_json(bp_data, file_path: str = MEASUREMENTS_FILE):
+    """Append a measurement dict to a JSON file, preserving previous entries and recording local timestamp."""
+    try:
+        entries = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        entries = data
+                    else:
+                        logger.warning(f"Existing JSON in {file_path} is not a list; initializing a new list.")
+            except json.JSONDecodeError:
+                logger.warning(f"Existing JSON in {file_path} is invalid; initializing a new list.")
+            except Exception as e:
+                logger.warning(f"Unable to read existing JSON file {file_path}: {e}")
+        # Copy to avoid mutating the original dict and add local timestamp
+        entry = dict(bp_data)
+        entry["recorded_at"] = datetime.now().isoformat(timespec="seconds")
+        entries.append(entry)
+        with open(file_path, 'w') as f:
+            json.dump(entries, f, indent=2)
+        logger.info(f"Appended measurement to {file_path} (total entries: {len(entries)})")
+    except Exception as e:
+        logger.error(f"Failed to write measurement to JSON: {e}")
 
 def parse_blood_pressure_measurement(data):
     """
@@ -115,8 +147,10 @@ def notification_handler(sender, data):
 
         # Signal completion only when the final measurement is received (e.g., includes pulse rate)
         if 'pulse_rate' in bp_data and measurement_event is not None and not measurement_event.is_set():
+            # Persist the final reading to JSON (appends and preserves previous entries)
+            append_measurement_to_json(bp_data)
             measurement_event.set()
-            logger.info("Final measurement received. Preparing to exit...")
+            logger.info("Final measurement received. Saved to JSON and preparing to exit...")
     else:
         logger.warning("Failed to parse blood pressure data")
 
