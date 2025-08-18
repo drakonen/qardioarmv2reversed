@@ -19,6 +19,9 @@ MAX_DISCOVERY_RETRIES = 10
 MAX_CONNECTION_RETRIES = 10
 RETRY_DELAY = 1  # seconds
 
+# Event to signal that a successful measurement has been received
+measurement_event = None  # type: asyncio.Event | None
+
 def parse_blood_pressure_measurement(data):
     """
     Parse the blood pressure measurement data according to Bluetooth SIG specification.
@@ -94,7 +97,9 @@ def parse_blood_pressure_measurement(data):
 def notification_handler(sender, data):
     """Handle incoming notifications from the blood pressure measurement characteristic."""
     logger.info(f"Received notification from {sender}: {data.hex()}")
-    
+
+    global measurement_event
+
     bp_data = parse_blood_pressure_measurement(data)
     if bp_data:
         logger.info(f"Blood Pressure Reading:")
@@ -107,6 +112,11 @@ def notification_handler(sender, data):
         
         if 'timestamp' in bp_data:
             logger.info(f"  Timestamp: {bp_data['timestamp']}")
+
+        # Signal completion only when the final measurement is received (e.g., includes pulse rate)
+        if 'pulse_rate' in bp_data and measurement_event is not None and not measurement_event.is_set():
+            measurement_event.set()
+            logger.info("Final measurement received. Preparing to exit...")
     else:
         logger.warning("Failed to parse blood pressure data")
 
@@ -212,6 +222,8 @@ async def main():
         return
     
     try:
+        global measurement_event
+        measurement_event = asyncio.Event()
         # Read the Blood Pressure Feature characteristic
         await read_blood_pressure_feature(client)
         
@@ -225,13 +237,12 @@ async def main():
             logger.error("Failed to activate blood pressure measurement")
             return
         
-        # Keep the script running to receive notifications
-        logger.info("Waiting for blood pressure measurements...")
-        logger.info("Press Ctrl+C to exit")
+        # Wait for the final complete measurement (with pulse rate)
+        logger.info("Waiting for the final complete blood pressure measurement...")
+        logger.info("The program will exit automatically after the measurement cycle completes (final reading received). Press Ctrl+C to cancel.")
         
-        # Wait for measurements (user can interrupt with Ctrl+C)
-        while True:
-            await asyncio.sleep(1)
+        await measurement_event.wait()
+        logger.info("Final measurement captured. Exiting...")
             
     except KeyboardInterrupt:
         logger.info("Monitoring stopped by user")
