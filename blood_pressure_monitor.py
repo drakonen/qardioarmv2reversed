@@ -40,6 +40,63 @@ RETRY_DELAY = 1  # seconds
 measurement_event = None  # type: asyncio.Event | None
 latest_measurement = None  # type: dict | None
 
+# ANSI colors for the health scale
+COLOR_RESET = "\033[0m"
+COLOR_GREEN = "\033[92m"   # Normal
+COLOR_YELLOW = "\033[93m"  # Elevated
+COLOR_ORANGE = "\033[33m"  # Hypertension Stage 1
+COLOR_RED = "\033[91m"     # Hypertension Stage 2
+COLOR_PURPLE = "\033[95m"  # Hypertensive Crisis
+
+def get_bp_category(systolic, diastolic):
+    """Determine the BP category based on AHA/ACC guidelines."""
+    if systolic >= 180 or diastolic >= 120:
+        return "CRISIS", COLOR_PURPLE
+    elif systolic >= 140 or diastolic >= 90:
+        return "STAGE 2", COLOR_RED
+    elif 130 <= systolic < 140 or 80 <= diastolic < 90:
+        return "STAGE 1", COLOR_ORANGE
+    elif 120 <= systolic < 130 and diastolic < 80:
+        return "ELEVATED", COLOR_YELLOW
+    elif systolic < 120 and diastolic < 80:
+        return "NORMAL", COLOR_GREEN
+    else:
+        # For cases that don't neatly fit, default to the higher category
+        if systolic >= 130 or diastolic >= 80:
+             return "STAGE 1", COLOR_ORANGE
+        return "NORMAL", COLOR_GREEN
+
+def get_health_scale_bar(systolic, diastolic):
+    """Generate a colorized ASCII health scale bar with a pointer."""
+    category, color = get_bp_category(systolic, diastolic)
+    
+    # Scale parts
+    segments = [
+        ("NORMAL", COLOR_GREEN),
+        ("ELEVATED", COLOR_YELLOW),
+        ("STAGE 1", COLOR_ORANGE),
+        ("STAGE 2", COLOR_RED),
+        ("CRISIS", COLOR_PURPLE)
+    ]
+    
+    # Create the bar
+    bar_parts = []
+    for name, col in segments:
+        bar_parts.append(f"{col}[{name}]{COLOR_RESET}")
+    bar = "".join(bar_parts)
+    
+    # Create the pointer
+    # Calculate pointer position (roughly centered on the category)
+    pointer_pos = 0
+    for name, _ in segments:
+        if name == category:
+            pointer_pos += (len(name) + 2) // 2
+            break
+        pointer_pos += len(name) + 2
+    
+    pointer = " " * pointer_pos + "↑"
+    return f"{bar}\n{color}{pointer}{COLOR_RESET} {color}{category}{COLOR_RESET}"
+
 # File to store all measurements as an array of JSON objects
 MEASUREMENTS_FILE = os.path.join(os.path.dirname(__file__), "measurements.json")
 
@@ -296,6 +353,14 @@ async def main():
             
             logger.info("*" * 40)
             logger.info(summary)
+            
+            # Add health scale interpretation
+            if units == 'mmHg':
+                scale_bar = get_health_scale_bar(sys, dia)
+                # Split by newline and log each part separately for cleaner output
+                for line in scale_bar.split('\n'):
+                    logger.info(line)
+            
             logger.info("*" * 40)
 
         logger.info("Exiting...")
