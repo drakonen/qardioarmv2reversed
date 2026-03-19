@@ -12,15 +12,15 @@ try:
 except Exception:  # pragma: no cover
     bleak_pkg = None
 
-# Configure logging (default to DEBUG for richer diagnostics)
-LOG_LEVEL = os.getenv("BP_MONITOR_LOG_LEVEL", "DEBUG").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.DEBUG),
-                    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+# Configure logging (default to INFO)
+LOG_LEVEL = os.getenv("BP_MONITOR_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-# Optionally enable Bleak internal debug logs too
+# Optionally enable Bleak logs
 try:
     bleak_logger = logging.getLogger("bleak")
-    bleak_logger.setLevel(getattr(logging, LOG_LEVEL, logging.DEBUG))
+    bleak_logger.setLevel(getattr(logging, LOG_LEVEL, logging.WARNING))
 except Exception:
     pass
 
@@ -38,6 +38,7 @@ RETRY_DELAY = 1  # seconds
 
 # Event to signal that a successful measurement has been received
 measurement_event = None  # type: asyncio.Event | None
+latest_measurement = None  # type: dict | None
 
 # File to store all measurements as an array of JSON objects
 MEASUREMENTS_FILE = os.path.join(os.path.dirname(__file__), "measurements.json")
@@ -142,12 +143,11 @@ def parse_blood_pressure_measurement(data):
 
 def notification_handler(sender, data):
     """Handle incoming notifications from the blood pressure measurement characteristic."""
-    logger.info(f"Received notification from {sender}: {data.hex()}")
-
-    global measurement_event
+    global measurement_event, latest_measurement
 
     bp_data = parse_blood_pressure_measurement(data)
     if bp_data:
+        latest_measurement = bp_data
         logger.info(f"Blood Pressure Reading:")
         logger.info(f"  Systolic: {bp_data['systolic']} {bp_data['units']}")
         logger.info(f"  Diastolic: {bp_data['diastolic']} {bp_data['units']}")
@@ -164,83 +164,52 @@ def notification_handler(sender, data):
             # Persist the final reading to JSON (appends and preserves previous entries)
             append_measurement_to_json(bp_data)
             measurement_event.set()
-            logger.info("Final measurement received. Saved to JSON and preparing to exit...")
+            logger.info("Final measurement received.")
     else:
         logger.warning("Failed to parse blood pressure data")
 
 async def discover_device():
-    """Discover the QardioARM 2 device with retry logic and detailed diagnostics."""
+    """Discover the QardioARM 2 device with retry logic."""
     for attempt in range(1, MAX_DISCOVERY_RETRIES + 1):
         try:
-            logger.info(f"Discovering devices (attempt {attempt}/{MAX_DISCOVERY_RETRIES})...")
+            logger.info(f"Discovering device (attempt {attempt}/{MAX_DISCOVERY_RETRIES})...")
             devices = await BleakScanner.discover()
-            logger.debug("Discovered devices (name, address, rssi):")
-            for d in devices:
-                try:
-                    logger.debug(f"  - {d.name!r} | {d.address} | RSSI={getattr(d, 'rssi', 'n/a')}")
-                except Exception:
-                    pass
-            logger.info(f"Found {len(devices)} Bluetooth devices")
             
             # Prefer exact name, otherwise try partial contains 'Qardio'
             device = next((dev for dev in devices if dev.name == DEVICE_NAME), None)
             if not device:
                 device = next((dev for dev in devices if (dev.name or '').strip().lower().startswith('qardioarm')), None)
             if device:
-                logger.info(f"Found target device: Name={device.name}, Address={device.address}, RSSI={getattr(device, 'rssi', 'n/a')}")
+                logger.info(f"Found {device.name} ({device.address})")
                 return device
             
-            logger.warning(f"Device named {DEVICE_NAME} not found on attempt {attempt}")
             if attempt < MAX_DISCOVERY_RETRIES:
-                logger.info(f"Retrying discovery in {RETRY_DELAY} seconds...")
                 await asyncio.sleep(RETRY_DELAY)
         except Exception as e:
-            logger.exception(f"Error during device discovery (attempt {attempt}): {e}")
+            logger.error(f"Error during device discovery (attempt {attempt}): {e}")
             if attempt < MAX_DISCOVERY_RETRIES:
-                logger.info(f"Retrying discovery in {RETRY_DELAY} seconds...")
                 await asyncio.sleep(RETRY_DELAY)
     
     logger.error(f"Device named {DEVICE_NAME} not found after {MAX_DISCOVERY_RETRIES} attempts.")
     return None
 
 async def connect_to_device(device):
-    """Connect to the device with retry logic and extensive diagnostics."""
+    """Connect to the device with retry logic."""
     for attempt in range(1, MAX_CONNECTION_RETRIES + 1):
         try:
-            logger.info(f"Attempting to connect to {device.address} (attempt {attempt}/{MAX_CONNECTION_RETRIES})...")
-            logger.debug(f"Device details: name={device.name!r}, rssi={getattr(device, 'rssi', 'n/a')}, metadata={getattr(device, 'metadata', {})}")
+            logger.info(f"Connecting to {device.name}...")
             client = BleakClient(device, timeout=20.0)
             
             await client.connect()
-            logger.info(f"Connected to {DEVICE_NAME}!")
-            try:
-                # Log backend and MTU if available
-                logger.debug(f"Client backend: {type(client).__name__}")
-                if hasattr(client, 'mtu_size'):
-                    logger.debug(f"Negotiated MTU: {getattr(client, 'mtu_size', None)}")
-                # Ensure services are discovered and dump their UUIDs
-                services = await client.get_services()
-                logger.info(f"Discovered {len(list(services.services.keys()))} services after connect")
-                for svc in services:
-                    logger.debug(f"Service {svc.uuid} handle={getattr(svc, 'handle', 'n/a')} - {len(svc.characteristics)} chars")
-                    for ch in svc.characteristics:
-                        logger.debug(f"  Char {ch.uuid} props={ch.properties} handle={getattr(ch, 'handle', 'n/a')}")
-                # Pre-check that expected UUIDs exist
-                have_bp_measure = any(ch.uuid.lower() == BP_MEASUREMENT_CHAR_UUID for svc in services for ch in svc.characteristics)
-                have_activation = any(ch.uuid.lower() == ACTIVATION_CHAR_UUID for svc in services for ch in svc.characteristics)
-                have_feature = any(ch.uuid.lower() == BP_FEATURE_CHAR_UUID for svc in services for ch in svc.characteristics)
-                logger.info(f"Presence check: measurement={have_bp_measure}, feature={have_feature}, activation={have_activation}")
-            except Exception as svc_e:
-                logger.exception(f"Service discovery/logging failed: {svc_e}")
+            logger.info(f"Connected to {DEVICE_NAME}")
             return client
             
         except BleakError as be:
-            logger.exception(f"BleakError: Failed to connect (attempt {attempt}): {be}")
+            logger.error(f"BleakError: Failed to connect (attempt {attempt}): {be}")
         except Exception as e:
-            logger.exception(f"Failed to connect (attempt {attempt}): {e}")
+            logger.error(f"Failed to connect (attempt {attempt}): {e}")
         
         if attempt < MAX_CONNECTION_RETRIES:
-            logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
             await asyncio.sleep(RETRY_DELAY)
     
     logger.error(f"Failed to connect to {device.address} after {MAX_CONNECTION_RETRIES} attempts.")
@@ -249,55 +218,38 @@ async def connect_to_device(device):
 async def read_blood_pressure_feature(client):
     """Read and interpret the Blood Pressure Feature characteristic."""
     try:
-        logger.debug(f"Reading Blood Pressure Feature characteristic {BP_FEATURE_CHAR_UUID}...")
         feature_data = await client.read_gatt_char(BP_FEATURE_CHAR_UUID)
-        logger.info(f"Blood Pressure Feature raw: {feature_data.hex()}")
         
         # Parse the feature flags (2 bytes)
         if len(feature_data) >= 2:
             features = int.from_bytes(feature_data[:2], byteorder='little', signed=False)
             
             feature_names = [
-                "Body Movement Detection",
-                "Cuff Fit Detection",
-                "Irregular Pulse Detection",
-                "Pulse Rate Range Detection",
-                "Measurement Position Detection",
-                "Multiple Bond Support"
+                "Body Movement", "Cuff Fit", "Irregular Pulse",
+                "Pulse Rate Range", "Measurement Position", "Multiple Bond"
             ]
             
-            enabled = []
-            for i, feature in enumerate(feature_names):
-                if features & (1 << i):
-                    enabled.append(feature)
-            logger.info(f"Supported features flags=0x{features:04x}: {', '.join(enabled) if enabled else 'none'}")
-        else:
-            logger.warning(f"Unexpected Blood Pressure Feature length: {len(feature_data)}")
+            enabled = [name for i, name in enumerate(feature_names) if features & (1 << i)]
+            if enabled:
+                logger.info(f"Supported features: {', '.join(enabled)}")
         
         return feature_data
     except Exception as e:
-        logger.exception(f"Error reading Blood Pressure Feature: {e}")
+        logger.error(f"Error reading features: {e}")
         return None
 
 async def activate_measurement(client):
     """Activate the blood pressure measurement."""
     try:
-        logger.info(f"Activating blood pressure measurement by writing to {ACTIVATION_CHAR_UUID} data={ACTIVATION_DATA.hex()}...")
         await client.write_gatt_char(ACTIVATION_CHAR_UUID, ACTIVATION_DATA, response=True)
-        logger.info("Blood pressure measurement activated")
+        logger.info("Activated measurement")
         return True
     except Exception as e:
-        logger.exception(f"Failed to activate blood pressure measurement: {e}")
+        logger.error(f"Failed to activate measurement: {e}")
         return False
 
 async def main():
     """Main function to orchestrate the blood pressure monitoring process."""
-    logger.info("Starting Blood Pressure Monitor for QardioARM 2")
-    logger.info(f"Environment: python={sys.version.split()[0]}, platform={platform.system()} {platform.release()}, machine={platform.machine()}")
-    if bleak_pkg is not None:
-        logger.info(f"Bleak version: {getattr(bleak_pkg, '__version__', 'unknown')}")
-    logger.debug(f"Log level: {LOG_LEVEL}")
-    
     # Discover the device
     device = await discover_device()
     if not device:
@@ -315,26 +267,38 @@ async def main():
         await read_blood_pressure_feature(client)
         
         # Subscribe to notifications from the Blood Pressure Measurement characteristic
-        logger.info("Subscribing to Blood Pressure Measurement notifications...")
         try:
             await client.start_notify(BP_MEASUREMENT_CHAR_UUID, notification_handler)
-            logger.info("Subscribed to Blood Pressure Measurement notifications")
         except Exception as e:
-            logger.exception(f"Failed to subscribe to notifications on {BP_MEASUREMENT_CHAR_UUID}: {e}")
+            logger.error(f"Failed to subscribe to notifications: {e}")
             return
         
         # Activate the blood pressure measurement
         success = await activate_measurement(client)
         if not success:
-            logger.error("Failed to activate blood pressure measurement")
             return
         
         # Wait for the final complete measurement (with pulse rate)
-        logger.info("Waiting for the final complete blood pressure measurement...")
-        logger.info("The program will exit automatically after the measurement cycle completes (final reading received). Press Ctrl+C to cancel.")
+        logger.info("Waiting for measurement... Press Ctrl+C to cancel.")
         
         await measurement_event.wait()
-        logger.info("Final measurement captured. Exiting...")
+        
+        # Display clear final summary
+        if latest_measurement:
+            sys = latest_measurement.get('systolic')
+            dia = latest_measurement.get('diastolic')
+            units = latest_measurement.get('units', 'mmHg')
+            pulse = latest_measurement.get('pulse_rate')
+            
+            summary = f"MEASUREMENT COMPLETE: {sys}/{dia} {units}"
+            if pulse:
+                summary += f", Pulse: {pulse} bpm"
+            
+            logger.info("*" * 40)
+            logger.info(summary)
+            logger.info("*" * 40)
+
+        logger.info("Exiting...")
             
     except KeyboardInterrupt:
         logger.info("Monitoring stopped by user")
@@ -346,17 +310,14 @@ async def main():
             if client is not None:
                 # Stop notifications if connected
                 try:
-                    if hasattr(client, 'is_connected'):
-                        logger.debug(f"Client connected at cleanup: {client.is_connected}")
                     await client.stop_notify(BP_MEASUREMENT_CHAR_UUID)
-                    logger.info("Stopped notifications")
-                except Exception as e:
-                    logger.debug(f"Ignoring error stopping notifications: {e}")
+                except Exception:
+                    pass
                 try:
                     await client.disconnect()
                     logger.info("Disconnected from device")
-                except Exception as e:
-                    logger.debug(f"Ignoring error on disconnect: {e}")
+                except Exception:
+                    pass
         except Exception as e:
             logger.exception(f"Error during cleanup: {e}")
 
