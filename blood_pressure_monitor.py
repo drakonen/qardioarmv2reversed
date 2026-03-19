@@ -66,9 +66,21 @@ def get_bp_category(systolic, diastolic):
              return "STAGE 1", COLOR_ORANGE
         return "NORMAL", COLOR_GREEN
 
+def get_bp_category_description(category):
+    """Provide a brief explanation of each blood pressure category."""
+    descriptions = {
+        "NORMAL": "Healthy range; maintain a heart-healthy lifestyle.",
+        "ELEVATED": "Blood pressure is higher than it should be; healthy lifestyle changes may be recommended.",
+        "STAGE 1": "Hypertension Stage 1; usually managed with lifestyle changes and possibly medication.",
+        "STAGE 2": "Hypertension Stage 2; usually requires a combination of medication and lifestyle changes.",
+        "CRISIS": "Hypertensive Crisis; REQUIRES IMMEDIATE MEDICAL ATTENTION if symptoms are present."
+    }
+    return descriptions.get(category, "")
+
 def get_health_scale_bar(systolic, diastolic):
-    """Generate a colorized ASCII health scale bar with a pointer."""
+    """Generate a colorized ASCII health scale bar with a pointer and description."""
     category, color = get_bp_category(systolic, diastolic)
+    description = get_bp_category_description(category)
     
     # Scale parts
     segments = [
@@ -95,7 +107,7 @@ def get_health_scale_bar(systolic, diastolic):
         pointer_pos += len(name) + 2
     
     pointer = " " * pointer_pos + "↑"
-    return f"{bar}\n{color}{pointer}{COLOR_RESET} {color}{category}{COLOR_RESET}"
+    return f"{bar}\n{color}{pointer}{COLOR_RESET} {color}{category}{COLOR_RESET}\n{color}Note: {description}{COLOR_RESET}"
 
 # File to store all measurements as an array of JSON objects
 MEASUREMENTS_FILE = os.path.join(os.path.dirname(__file__), "measurements.json")
