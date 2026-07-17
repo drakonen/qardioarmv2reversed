@@ -7,6 +7,7 @@ from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
 import sys
 import platform
+import argparse
 try:
     import bleak as bleak_pkg
 except Exception:  # pragma: no cover
@@ -109,6 +110,89 @@ def get_health_scale_bar(systolic, diastolic):
     pointer = " " * pointer_pos + "↑"
     return f"{bar}\n{color}{pointer}{COLOR_RESET} {color}{category}{COLOR_RESET}\n{color}Note: {description}{COLOR_RESET}"
 
+def get_bp_category_color(systolic, diastolic):
+    """Determine the BP category color based on AHA/ACC guidelines."""
+    _, color = get_bp_category(systolic, diastolic)
+    return color
+
+def render_historical_chart(measurements, width=40):
+    """Render a colored ASCII line chart of BP measurements."""
+    # Filter out obvious errors (like SFLOAT NaN which parses as 2047)
+    valid_measurements = [m for m in measurements if 0 < m['systolic'] < 400 and 0 < m['diastolic'] < 400]
+    if not valid_measurements:
+        return "No valid historical measurements available."
+    
+    # Extract values and categories
+    sys_values = [m['systolic'] for m in valid_measurements]
+    dia_values = [m['diastolic'] for m in valid_measurements]
+    colors = [get_bp_category_color(m['systolic'], m['diastolic']) for m in valid_measurements]
+    
+    # Calculate range
+    all_values = sys_values + dia_values
+    min_v = min(all_values)
+    max_v = max(all_values)
+    
+    # Use a range from roughly (min-10) to (max+10), but at least 40 to 200
+    lower_bound = max(0, int((min_v - 10) // 10 * 10))
+    upper_bound = int((max_v + 10 + 9) // 10 * 10)
+    
+    # Adjust for minimum range to avoid flat lines looking weird
+    if upper_bound - lower_bound < 40:
+        upper_bound = lower_bound + 40
+        
+    v_range = upper_bound - lower_bound
+    
+    lines = []
+    lines.append(f"\nHISTORICAL BLOOD PRESSURE TREND (Showing last {len(valid_measurements)} measurements)")
+    lines.append("-" * 50)
+    
+    for i in range(len(valid_measurements)):
+        s = sys_values[i]
+        d = dia_values[i]
+        c = colors[i]
+        
+        sys_col = int((s - lower_bound) / v_range * width)
+        dia_col = int((d - lower_bound) / v_range * width)
+        
+        row_chars = [' '] * (width + 1)
+        for col in range(width + 1):
+            if col == sys_col:
+                row_chars[col] = f"{c}S{COLOR_RESET}"
+            elif col == dia_col:
+                row_chars[col] = f"{c}D{COLOR_RESET}"
+            elif dia_col < col < sys_col:
+                row_chars[col] = f"{c}─{COLOR_RESET}"
+        
+        # Determine the label for this measurement
+        # The most recent is at the end (bottom)
+        label = f"M{i+1}"
+        if i == len(valid_measurements) - 1:
+            label = "Now"
+        
+        row_str = f"{label:>4} | " + "".join(row_chars)
+        lines.append(row_str)
+    
+    # X-axis
+    lines.append("     +-" + "-" * width)
+    
+    # Generate X-axis labels
+    label_str = [' '] * (width + 10)
+    last_col_end = -1
+    for val in range(lower_bound, upper_bound + 1, 10):
+        col = int((val - lower_bound) / v_range * width)
+        val_s = str(val)
+        if col > last_col_end:
+            for j, ch in enumerate(val_s):
+                if col + j < len(label_str):
+                    label_str[col + j] = ch
+            last_col_end = col + len(val_s)
+                
+    lines.append("       " + "".join(label_str).rstrip())
+    lines.append("-" * 50)
+    lines.append("Legend: S=Systolic, D=Diastolic, Color=Category")
+    
+    return "\n".join(lines)
+
 # File to store all measurements as an array of JSON objects
 MEASUREMENTS_FILE = os.path.join(os.path.dirname(__file__), "measurements.json")
 
@@ -123,18 +207,36 @@ def append_measurement_to_json(bp_data, file_path: str = MEASUREMENTS_FILE):
                     if isinstance(data, list):
                         entries = data
                     else:
-                        logger.warning(f"Existing JSON in {file_path} is not a list; initializing a new list.")
+                        logger.warning(f"Existing JSON in {file_path} is not a list. Initializing a new list.")
             except json.JSONDecodeError:
-                logger.warning(f"Existing JSON in {file_path} is invalid; initializing a new list.")
+                # If file is invalid, create a backup instead of just losing it
+                backup_path = f"{file_path}.bak.{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                try:
+                    import shutil
+                    shutil.copy2(file_path, backup_path)
+                    logger.warning(f"Existing JSON in {file_path} is invalid. Backed up to {backup_path} and initializing a new list.")
+                except Exception as e:
+                    logger.error(f"Failed to backup invalid JSON file {file_path}: {e}")
             except Exception as e:
                 logger.warning(f"Unable to read existing JSON file {file_path}: {e}")
+        
         # Copy to avoid mutating the original dict and add local timestamp
         entry = dict(bp_data)
         entry["recorded_at"] = datetime.now().isoformat(timespec="seconds")
         entries.append(entry)
-        with open(file_path, 'w') as f:
-            json.dump(entries, f, indent=2)
-        logger.info(f"Appended measurement to {file_path} (total entries: {len(entries)})")
+        
+        # Write to a temporary file first for atomic-like replacement
+        temp_file = f"{file_path}.tmp"
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(entries, f, indent=2)
+            os.replace(temp_file, file_path)
+            logger.info(f"Appended measurement to {file_path} (total entries: {len(entries)})")
+        except Exception as e:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            raise e
+            
     except Exception as e:
         logger.error(f"Failed to write measurement to JSON: {e}")
 
@@ -317,6 +419,20 @@ async def activate_measurement(client):
         logger.error(f"Failed to activate measurement: {e}")
         return False
 
+def get_historical_measurements(file_path: str = MEASUREMENTS_FILE, limit: int = 50):
+    """Read historical measurements from the JSON file, limiting the number of entries for display."""
+    if not os.path.exists(file_path):
+        return []
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                # We store everything, but return a subset for the chart to keep it readable
+                return data[-limit:]
+    except Exception as e:
+        logger.warning(f"Failed to read historical measurements: {e}")
+    return []
+
 async def main():
     """Main function to orchestrate the blood pressure monitoring process."""
     # Discover the device
@@ -374,6 +490,14 @@ async def main():
                     logger.info(line)
             
             logger.info("*" * 40)
+            
+            # Show historical chart
+            history = get_historical_measurements()
+            if len(history) > 1:
+                chart = render_historical_chart(history)
+                for line in chart.split('\n'):
+                    logger.info(line)
+                logger.info("*" * 40)
 
         logger.info("Exiting...")
             
@@ -399,6 +523,18 @@ async def main():
             logger.exception(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Blood Pressure Monitor for QardioARM 2")
+    parser.add_argument("--graph-only", action="store_true", help="Show only the historical graph and exit")
+    args = parser.parse_args()
+
+    if args.graph_only:
+        history = get_historical_measurements()
+        if len(history) > 0:
+            print(render_historical_chart(history))
+        else:
+            print("No historical measurements available.")
+        sys.exit(0)
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
