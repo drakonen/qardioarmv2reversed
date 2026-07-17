@@ -475,11 +475,23 @@ async def main():
             units = latest_measurement.get('units', 'mmHg')
             pulse = latest_measurement.get('pulse_rate')
             
+            logger.info("*" * 40)
+            
+            # Show historical chart
+            history = get_historical_measurements()
+            if len(history) > 1:
+                chart = render_historical_chart(history)
+                for i, line in enumerate(chart.split('\n')):
+                    # Skip the first empty newline to avoid double spacing after asterisks
+                    if i == 0 and line == "":
+                        continue
+                    logger.info(line)
+                logger.info("*" * 40)
+            
             summary = f"MEASUREMENT COMPLETE: {sys}/{dia} {units}"
             if pulse:
                 summary += f", Pulse: {pulse} bpm"
             
-            logger.info("*" * 40)
             logger.info(summary)
             
             # Add health scale interpretation
@@ -490,14 +502,6 @@ async def main():
                     logger.info(line)
             
             logger.info("*" * 40)
-            
-            # Show historical chart
-            history = get_historical_measurements()
-            if len(history) > 1:
-                chart = render_historical_chart(history)
-                for line in chart.split('\n'):
-                    logger.info(line)
-                logger.info("*" * 40)
 
         logger.info("Exiting...")
             
